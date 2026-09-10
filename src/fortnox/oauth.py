@@ -79,13 +79,19 @@ def _basic_auth_header(config: FortnoxConfig) -> str:
 
 
 def _post_token(
-    config: FortnoxConfig, data: dict[str, str], *, client: httpx.Client | None = None
+    config: FortnoxConfig,
+    data: dict[str, str],
+    *,
+    client: httpx.Client | None = None,
+    extra_headers: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     headers = {
         "Authorization": _basic_auth_header(config),
         "Content-Type": "application/x-www-form-urlencoded",
         "Accept": "application/json",
     }
+    if extra_headers:
+        headers.update(extra_headers)
     if client is not None:
         response = client.post(config.token_url, data=data, headers=headers)
     else:
@@ -129,6 +135,49 @@ def exchange_code(config: FortnoxConfig, code: str, *, client: httpx.Client | No
         client=client,
     )
     return Token.from_response(payload)
+
+
+def fetch_service_account_token(
+    config: FortnoxConfig,
+    tenant_id: str | None = None,
+    *,
+    scopes: list[str] | None = None,
+    client: httpx.Client | None = None,
+) -> Token:
+    """Mint an access token with the client-credentials grant.
+
+    This is the better path for unattended integrations. Instead of guarding a
+    single-use refresh token for 45 days, a fresh access token can be minted at
+    any time from the client id, client secret and tenant id - there is no
+    refresh token to rotate, lose, or race on.
+
+    It requires the customer to have activated with ``account_type=service``,
+    which :func:`build_authorization_url` requests by default. The consent from
+    that activation is what this grant draws on.
+
+    Args:
+        tenant_id: The customer's tenant, sent in the ``TenantId`` header.
+            Defaults to ``config.tenant_id``. It is the same value as
+            ``DatabaseNumber`` from ``/3/companyinformation``, and is also a
+            claim on any access token you already hold.
+        scopes: Scopes to request. If omitted, Fortnox uses the scopes from the
+            customer's consent.
+    """
+    tenant_id = tenant_id or config.tenant_id
+    if not tenant_id:
+        raise FortnoxConfigError(
+            "tenant_id is required for the client-credentials grant "
+            "(set FORTNOX_TENANT_ID, or read DatabaseNumber from /3/companyinformation)"
+        )
+
+    data = {"grant_type": "client_credentials"}
+    requested = scopes if scopes is not None else None
+    if requested:
+        data["scope"] = " ".join(requested)
+
+    payload = _post_token(config, data, client=client, extra_headers={"TenantId": str(tenant_id)})
+    # This grant returns no refresh token - that is the whole point of it.
+    return Token.from_response(payload, require_refresh_token=False)
 
 
 def refresh_token(

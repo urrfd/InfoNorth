@@ -61,17 +61,59 @@ def _cmd_exchange(config: FortnoxConfig, args: argparse.Namespace) -> int:
 
 
 def _cmd_status(config: FortnoxConfig, args: argparse.Namespace) -> int:
+    mode = "client-credentials (service account)" if config.tenant_id else "refresh token"
     store = FileTokenStore(config.token_path)
     token = store.load()
     if token is None:
-        print(f"No token stored at {config.token_path}. Run `fortnox-auth url` first.")
+        hint = "service-token" if config.tenant_id else "url"
+        print(f"Auth mode: {mode}")
+        print(f"No token stored at {config.token_path}. Run `fortnox-auth {hint}` first.")
         return 1
+
+    print(f"Auth mode:  {mode}")
     print(f"Token file: {config.token_path}")
     print(f"  access token expires:  {_fmt_time(token.expires_at)}")
     print(f"  expired:               {token.is_expired()}")
     print(f"  obtained:              {_fmt_time(token.obtained_at)}")
-    print(f"  refresh token expires: ~{_fmt_time(token.refresh_token_expires_at)} (estimated)")
+    print(f"  tenant id:             {token.tenant_id or '(not present in token)'}")
     print(f"  scopes:                {' '.join(token.scopes) or '(none reported)'}")
+    if token.refresh_token:
+        print(f"  refresh token expires: ~{_fmt_time(token.refresh_token_expires_at)} (estimated)")
+    else:
+        print("  refresh token:         none (client-credentials tokens do not have one)")
+    return 0
+
+
+def _cmd_tenant(config: FortnoxConfig, args: argparse.Namespace) -> int:
+    """Print the tenant id, so it can be pinned as FORTNOX_TENANT_ID."""
+    token = FileTokenStore(config.token_path).load()
+    if token is None:
+        print(f"No token stored at {config.token_path}.", file=sys.stderr)
+        return 1
+
+    tenant_id = token.tenant_id
+    if tenant_id:
+        print(tenant_id)
+        return 0
+
+    print(
+        "The stored token carries no tenantId claim. Read DatabaseNumber from\n"
+        "  fortnox-auth get companyinformation\n"
+        "(requires the companyinformation scope).",
+        file=sys.stderr,
+    )
+    return 1
+
+
+def _cmd_service_token(config: FortnoxConfig, args: argparse.Namespace) -> int:
+    """Mint an access token with client-credentials - no refresh token involved."""
+    token = oauth.fetch_service_account_token(config, args.tenant_id)
+    store = FileTokenStore(config.token_path)
+    with store.transaction():
+        store.save(token)
+    print(f"Minted a service-account token, saved to {config.token_path}")
+    print(f"  expires: {_fmt_time(token.expires_at)}")
+    print(f"  scopes:  {' '.join(token.scopes) or '(from consent)'}")
     return 0
 
 
@@ -117,6 +159,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     refresh_parser = subparsers.add_parser("refresh", help="force a token refresh")
     refresh_parser.set_defaults(func=_cmd_refresh)
+
+    tenant_parser = subparsers.add_parser(
+        "tenant", help="print the tenant id from the stored token"
+    )
+    tenant_parser.set_defaults(func=_cmd_tenant)
+
+    service_parser = subparsers.add_parser(
+        "service-token", help="mint a token via the client-credentials grant"
+    )
+    service_parser.add_argument("--tenant-id", help="tenant id; defaults to FORTNOX_TENANT_ID")
+    service_parser.set_defaults(func=_cmd_service_token)
 
     get_parser = subparsers.add_parser("get", help="make an authenticated GET request")
     get_parser.add_argument("path", help="API path, e.g. companyinformation")

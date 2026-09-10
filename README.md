@@ -8,9 +8,15 @@ A Python client for the [Fortnox API](https://www.fortnox.se/developer). It hand
 parts of the integration that are easy to get wrong and expensive to get wrong:
 token refresh, single-use refresh-token rotation, rate limiting and retries.
 
-### Why this exists
+### Two ways to authenticate
 
-Fortnox's OAuth2 has two sharp edges:
+**Client credentials (recommended for InfoNorth).** If the customer activates with
+`account_type=service`, you can mint an access token any time from client id + client
+secret + tenant id. There is no refresh token to rotate, lose, or race on. Set
+`FORTNOX_TENANT_ID` and the client uses this automatically.
+
+**Authorization code + refresh token.** The general-purpose flow, for user accounts.
+Supported in full, including the awkward parts below.
 
 | Thing | Lifetime | Catch |
 |---|---|---|
@@ -24,7 +30,7 @@ is locked out and a human has to click through the authorization flow again. Thi
 serializes the whole read-check-refresh-write cycle under a lock and writes the token file
 atomically, so neither can happen.
 
-On top of that, Fortnox rate-limits to **25 requests per 5 seconds** per access token
+Either way, Fortnox rate-limits to **25 requests per 5 seconds** per access token
 (300/minute per client-id and tenant), and bursting past it keeps the limiter engaged
 until the average drops back down. The client paces requests locally rather than absorbing
 the 429s.
@@ -50,6 +56,12 @@ export FORTNOX_SCOPES="companyinformation customer invoice"
 `FORTNOX_REDIRECT_URI` must match the value registered on the integration character for
 character, or the token exchange fails.
 
+### Test against a sandbox first
+
+The developer portal lets you create up to **30 test environments** — each a full Fortnox
+company tied to your developer account, using the same email as the user who created it.
+Do the first end-to-end run against one of those, not a live customer.
+
 ### Authorize (once per Fortnox tenant)
 
 ```bash
@@ -70,6 +82,24 @@ fortnox-auth get companyinformation
 The token pair lands in `FORTNOX_TOKEN_PATH` (default `fortnox_token.json`) with `0600`
 permissions. It is gitignored — **do not commit it**.
 
+### Switch to client credentials (no more refresh tokens)
+
+Once you have any token for the tenant, read its id and pin it:
+
+```bash
+fortnox-auth tenant           # reads the tenantId claim out of the access token
+export FORTNOX_TENANT_ID=...
+fortnox-auth service-token    # mints a token — no refresh token involved
+```
+
+The tenant id is also `DatabaseNumber` from `/3/companyinformation` (needs the
+`companyinformation` scope), and Fortnox can push it to you via the *Consent created* /
+*Consent revoked* webhooks configured in the developer portal.
+
+With `FORTNOX_TENANT_ID` set, `FortnoxClient` mints tokens on demand and ignores any
+stored refresh token entirely. The two flows can coexist for the same integration if you
+need user-account tokens as well.
+
 ### Use
 
 ```python
@@ -84,15 +114,20 @@ with FortnoxClient(config) as client:
     for customer in client.paginate("customers", "Customers"):
         print(customer["CustomerNumber"], customer["Name"])
 
-    # Filters pass straight through.
-    unpaid = client.paginate("invoices", "Invoices", params={"filter": "unpaid"})
+    # Filters pass straight through. Note Fortnox allows only ONE resource-specific
+    # filter at a time, though you may combine it with a global one like lastmodified.
+    unpaid = client.paginate("invoices", "Invoices", params={"filter": "unpaid"}, limit=500)
 
     client.post("customers", json={"Customer": {"Name": "Acme AB"}})
 ```
 
-Refreshing happens automatically — there is no `login()` to call. The client refreshes when
-the access token is within 120 seconds of expiry, and once more if Fortnox unexpectedly
-returns 401.
+Token handling is automatic — there is no `login()` to call. The client obtains a token
+when the current one is within 120 seconds of expiry, and once more if Fortnox
+unexpectedly returns 401.
+
+`limit` accepts 1–500 (Fortnox's documented range, default 100) and is validated before
+the request goes out. Raising it is the cheapest way to cut rate-limit pressure on bulk
+reads. `sortby` and `sortorder` pass through in `params`.
 
 ### Errors
 
@@ -145,10 +180,19 @@ client = FortnoxClient(config, token_store=DatabaseTokenStore())
 The rate limiter is per-process, so size each worker's `rate_limit_requests` to its share
 of the tenant's 25-per-5-seconds budget.
 
+### Known gaps
+
+- **File endpoints** (`archive`, `inbox`) need `multipart/form-data`; this client only
+  sends JSON bodies.
+- **Scopes are read+write** — there is no read-only variant — and cannot be added silently
+  to an existing connection. Widening them means every customer re-activates, so request
+  what you need up front.
+- No live call has been made from this repo yet; the suite runs entirely against mocks.
+
 ### Develop
 
 ```bash
-.venv/bin/python -m pytest              # 67 tests, no network required
+.venv/bin/python -m pytest              # 99 tests, no network required
 .venv/bin/python -m pytest --cov=fortnox
 .venv/bin/python -m ruff check .
 .venv/bin/python -m ruff format .

@@ -17,6 +17,10 @@ API_BASE_URL = "https://api.fortnox.se/3"
 RATE_LIMIT_REQUESTS = 25
 RATE_LIMIT_WINDOW_SECONDS = 5.0
 
+# Fortnox caps list endpoints at 500 records per page and defaults to 100.
+MAX_PAGE_LIMIT = 500
+DEFAULT_PAGE_LIMIT = 100
+
 # Access tokens live for one hour. Refresh this many seconds before expiry so a
 # request is never sent with a token that expires mid-flight.
 DEFAULT_REFRESH_LEEWAY_SECONDS = 120
@@ -39,6 +43,10 @@ class FortnoxConfig:
         redirect_uri: Must match the redirect URI registered in the portal exactly.
         scopes: Scopes to request during authorization, e.g. ``["customer", "invoice"]``.
         token_path: Where the token file is persisted.
+        tenant_id: The customer's Fortnox tenant (their ``DatabaseNumber``). Setting
+            it switches the client to the client-credentials grant, which mints
+            access tokens on demand and needs no refresh token at all. Only works
+            for customers who activated with ``account_type=service``.
     """
 
     client_id: str
@@ -46,6 +54,7 @@ class FortnoxConfig:
     redirect_uri: str = ""
     scopes: list[str] = field(default_factory=list)
     token_path: str = "fortnox_token.json"
+    tenant_id: str | None = None
 
     authorize_url: str = AUTHORIZE_URL
     token_url: str = TOKEN_URL
@@ -69,8 +78,9 @@ class FortnoxConfig:
         """Build a config from ``FORTNOX_*`` environment variables.
 
         Reads FORTNOX_CLIENT_ID, FORTNOX_CLIENT_SECRET, FORTNOX_REDIRECT_URI,
-        FORTNOX_SCOPES (space or comma separated) and FORTNOX_TOKEN_PATH.
-        Any keyword argument overrides the corresponding environment value.
+        FORTNOX_SCOPES (space or comma separated), FORTNOX_TOKEN_PATH and
+        FORTNOX_TENANT_ID. Any keyword argument overrides the corresponding
+        environment value.
         """
         client_id = _env("FORTNOX_CLIENT_ID")
         client_secret = _env("FORTNOX_CLIENT_SECRET")
@@ -88,6 +98,7 @@ class FortnoxConfig:
             "redirect_uri": _env("FORTNOX_REDIRECT_URI", "") or "",
             "scopes": scopes,
             "token_path": _env("FORTNOX_TOKEN_PATH", "fortnox_token.json"),
+            "tenant_id": _env("FORTNOX_TENANT_ID"),
         }
         values.update(overrides)
         return cls(**values)  # type: ignore[arg-type]

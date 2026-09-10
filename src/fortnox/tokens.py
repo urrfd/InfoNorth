@@ -16,6 +16,8 @@ Everything here is built around those two failure modes:
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import os
 import tempfile
@@ -33,26 +35,66 @@ from .errors import TokenError
 REFRESH_TOKEN_TTL_SECONDS = 45 * 24 * 60 * 60
 
 
+def decode_jwt_claims(token: str) -> dict[str, Any]:
+    """Decode a JWT's payload *without verifying its signature*.
+
+    Fortnox access tokens are JWTs carrying claims such as ``tenantId``. The
+    signing key is not published, so the signature cannot be checked - which is
+    fine here, because the token came from Fortnox over TLS and is only being
+    read for routing metadata, never trusted for an access decision.
+
+    Returns an empty dict for anything that is not a decodable JWT.
+    """
+    parts = token.split(".")
+    if len(parts) != 3:
+        return {}
+    payload = parts[1]
+    payload += "=" * (-len(payload) % 4)  # restore base64 padding
+    try:
+        decoded = base64.urlsafe_b64decode(payload)
+        claims = json.loads(decoded)
+    except (binascii.Error, ValueError, UnicodeDecodeError):
+        return {}
+    return claims if isinstance(claims, dict) else {}
+
+
 @dataclass(frozen=True, slots=True)
 class Token:
     """An OAuth2 token pair plus the metadata needed to manage its lifecycle."""
 
     access_token: str
-    refresh_token: str
-    expires_at: float
+    refresh_token: str = ""
+    expires_at: float = 0.0
     scopes: tuple[str, ...] = ()
     token_type: str = "Bearer"
     obtained_at: float = 0.0
 
     @classmethod
-    def from_response(cls, payload: dict[str, Any], *, now: float | None = None) -> Token:
-        """Build a token from a Fortnox ``/oauth-v1/token`` response body."""
+    def from_response(
+        cls,
+        payload: dict[str, Any],
+        *,
+        now: float | None = None,
+        require_refresh_token: bool = True,
+    ) -> Token:
+        """Build a token from a Fortnox ``/oauth-v1/token`` response body.
+
+        Args:
+            require_refresh_token: True for the authorization-code and refresh
+                grants, where a missing refresh token means the request went out
+                without ``access_type=offline`` and the integration would break
+                an hour later. The client-credentials grant returns no refresh
+                token by design, so it passes False.
+        """
         now = time.time() if now is None else now
         try:
             access_token = payload["access_token"]
-            refresh_token = payload["refresh_token"]
         except KeyError as exc:
             raise TokenError(f"token response missing {exc.args[0]!r}") from exc
+
+        refresh_token = payload.get("refresh_token", "")
+        if require_refresh_token and not refresh_token:
+            raise TokenError("token response missing 'refresh_token'")
 
         expires_in = payload.get("expires_in", 3600)
         try:
@@ -76,6 +118,19 @@ class Token:
         """True if the access token is expired, or expires within ``leeway`` seconds."""
         now = time.time() if now is None else now
         return now + leeway >= self.expires_at
+
+    @property
+    def tenant_id(self) -> str | None:
+        """The Fortnox tenant this token belongs to, read from its JWT claims."""
+        claims = self.claims()
+        for key, value in claims.items():
+            if key.lower() in ("tenantid", "tenant_id") and value not in (None, ""):
+                return str(value)
+        return None
+
+    def claims(self) -> dict[str, Any]:
+        """Decode the access token's JWT payload. Returns {} if it is not a JWT."""
+        return decode_jwt_claims(self.access_token)
 
     @property
     def refresh_token_expires_at(self) -> float:

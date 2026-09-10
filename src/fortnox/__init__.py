@@ -22,8 +22,19 @@ from .errors import (
     ServerError,
     TokenError,
 )
-from .oauth import build_authorization_url, exchange_code, refresh_token
-from .tokens import FileTokenStore, MemoryTokenStore, Token, TokenStore
+from .oauth import (
+    build_authorization_url,
+    exchange_code,
+    fetch_service_account_token,
+    refresh_token,
+)
+from .tokens import (
+    FileTokenStore,
+    MemoryTokenStore,
+    Token,
+    TokenStore,
+    decode_jwt_claims,
+)
 
 __version__ = "0.1.0"
 
@@ -46,6 +57,8 @@ __all__ = [
     "TokenError",
     "TokenStore",
     "build_authorization_url",
+    "decode_jwt_claims",
     "exchange_code",
+    "fetch_service_account_token",
     "refresh_token",
 ]

@@ -10,7 +10,7 @@ from typing import Any
 import httpx
 
 from . import oauth
-from .config import FortnoxConfig
+from .config import DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT, FortnoxConfig
 from .errors import (
     AuthenticationError,
     AuthorizationError,
@@ -80,8 +80,44 @@ class FortnoxClient:
             )
         return token
 
+    @property
+    def uses_service_account(self) -> bool:
+        """True when a tenant id is configured, selecting the client-credentials grant."""
+        return bool(self.config.tenant_id)
+
+    def _is_usable(self, token: Token | None, *, force_refresh: bool) -> bool:
+        if token is None or force_refresh:
+            return False
+        return not token.is_expired(leeway=self.config.refresh_leeway_seconds)
+
     def _access_token(self, *, force_refresh: bool = False) -> str:
-        """Return a usable access token, refreshing it if needed.
+        """Return a usable access token, obtaining a new one if needed."""
+        if self.uses_service_account:
+            return self._service_account_token(force_refresh=force_refresh)
+        return self._refreshed_token(force_refresh=force_refresh)
+
+    def _service_account_token(self, *, force_refresh: bool) -> str:
+        """Mint an access token with the client-credentials grant.
+
+        There is no refresh token here, so a cache miss costs one extra token
+        request and nothing else. The lock only keeps a burst of threads from
+        minting redundantly.
+        """
+        cached = self.token_store.load()
+        if self._is_usable(cached, force_refresh=force_refresh):
+            return cached.access_token  # type: ignore[union-attr]
+
+        with self.token_store.transaction():
+            cached = self.token_store.load()
+            if self._is_usable(cached, force_refresh=force_refresh):
+                return cached.access_token  # type: ignore[union-attr]
+
+            token = oauth.fetch_service_account_token(self.config, client=self._http)
+            self.token_store.save(token)
+            return token.access_token
+
+    def _refreshed_token(self, *, force_refresh: bool) -> str:
+        """Return a usable access token from the stored refresh token.
 
         The whole read-check-refresh-write cycle runs inside the store's
         transaction, so concurrent workers cannot burn each other's single-use
@@ -89,15 +125,13 @@ class FortnoxClient:
         winner just wrote instead of refreshing again.
         """
         token = self.current_token()
-        if not force_refresh and not token.is_expired(leeway=self.config.refresh_leeway_seconds):
+        if self._is_usable(token, force_refresh=force_refresh):
             return token.access_token
 
         with self.token_store.transaction():
             token = self.current_token()
             # Another process may have refreshed while we waited for the lock.
-            if not force_refresh and not token.is_expired(
-                leeway=self.config.refresh_leeway_seconds
-            ):
+            if self._is_usable(token, force_refresh=force_refresh):
                 return token.access_token
 
             new_token = oauth.refresh_token(self.config, token, client=self._http)
@@ -188,7 +222,7 @@ class FortnoxClient:
         collection_key: str,
         *,
         params: dict[str, Any] | None = None,
-        limit: int = 100,
+        limit: int = DEFAULT_PAGE_LIMIT,
     ) -> Iterator[dict[str, Any]]:
         """Yield every record of a paged list endpoint.
 
@@ -204,8 +238,15 @@ class FortnoxClient:
             path: List endpoint, e.g. ``"customers"``.
             collection_key: The key holding the records, e.g. ``"Customers"``.
             params: Extra filters passed through on every page request.
-            limit: Records per page. Fortnox caps this at 500.
+            limit: Records per page, 1 to 500. Larger pages mean fewer requests
+                against the rate limit, so raise it for bulk reads.
+
+        Raises:
+            ValueError: if ``limit`` is outside the range Fortnox accepts.
         """
+        if not 1 <= limit <= MAX_PAGE_LIMIT:
+            raise ValueError(f"limit must be between 1 and {MAX_PAGE_LIMIT}, got {limit}")
+
         page = 1
         while True:
             page_params = dict(params or {})

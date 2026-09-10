@@ -78,3 +78,59 @@ def test_unrecoverable_token_error_exits_nonzero(env, capsys):
     respx.post(TOKEN_URL).mock(return_value=httpx.Response(400, json={"error": "invalid_grant"}))
     assert main(["exchange", "stale-code"]) == 1
     assert "error:" in capsys.readouterr().err
+
+
+def test_tenant_command_reports_a_missing_token(capsys):
+    assert main(["tenant"]) == 1
+    assert "No token stored" in capsys.readouterr().err
+
+
+@respx.mock
+def test_tenant_command_prints_the_claim(env, monkeypatch, capsys):
+    from tests.test_service_account import make_jwt
+
+    respx.post(TOKEN_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "access_token": make_jwt({"tenantId": 424242}),
+                "refresh_token": "r",
+                "expires_in": 3600,
+            },
+        )
+    )
+    main(["exchange", "the-code"])
+    capsys.readouterr()
+
+    assert main(["tenant"]) == 0
+    assert capsys.readouterr().out.strip() == "424242"
+
+
+@respx.mock
+def test_service_token_command_mints_without_a_refresh_token(env, monkeypatch, capsys):
+    monkeypatch.setenv("FORTNOX_TENANT_ID", "424242")
+    route = respx.post(TOKEN_URL).mock(
+        return_value=httpx.Response(200, json={"access_token": "svc", "expires_in": 3600})
+    )
+
+    assert main(["service-token"]) == 0
+
+    assert route.calls.last.request.headers["TenantId"] == "424242"
+    token = FileTokenStore(env / "token.json").load()
+    assert token.access_token == "svc"
+    assert token.refresh_token == ""
+
+
+@respx.mock
+def test_status_command_reports_service_account_mode(env, monkeypatch, capsys):
+    monkeypatch.setenv("FORTNOX_TENANT_ID", "424242")
+    respx.post(TOKEN_URL).mock(
+        return_value=httpx.Response(200, json={"access_token": "svc", "expires_in": 3600})
+    )
+    main(["service-token"])
+    capsys.readouterr()
+
+    assert main(["status"]) == 0
+    out = capsys.readouterr().out
+    assert "client-credentials" in out
+    assert "none (client-credentials tokens do not have one)" in out

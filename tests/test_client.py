@@ -383,3 +383,21 @@ def test_paginate_handles_an_empty_collection(client):
         return_value=httpx.Response(200, json={"MetaInformation": {"@TotalPages": 0}})
     )
     assert list(client.paginate("customers", "Customers")) == []
+
+
+# -- documented limit bounds ---------------------------------------------
+
+
+@pytest.mark.parametrize("limit", [0, -1, 501, 1000])
+def test_paginate_rejects_limits_outside_the_documented_range(client, limit):
+    with pytest.raises(ValueError, match="between 1 and 500"):
+        list(client.paginate("customers", "Customers", limit=limit))
+
+
+@respx.mock
+@pytest.mark.parametrize("limit", [1, 500])
+def test_paginate_accepts_the_documented_bounds(client, limit):
+    respx.get(f"{API}/customers").mock(
+        return_value=httpx.Response(200, json={"MetaInformation": {"@TotalPages": 1}})
+    )
+    assert list(client.paginate("customers", "Customers", limit=limit)) == []
