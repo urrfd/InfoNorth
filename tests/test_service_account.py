@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import base64
-import json
 import time
 from urllib.parse import parse_qs
 
@@ -27,26 +26,15 @@ SERVICE_TOKEN_RESPONSE = {
 }
 
 
-def make_jwt(claims: dict) -> str:
-    """Build a JWT-shaped string. The signature is never verified."""
-
-    def b64(data: bytes) -> str:
-        return base64.urlsafe_b64encode(data).decode().rstrip("=")
-
-    header = b64(json.dumps({"alg": "RS256", "typ": "JWT"}).encode())
-    payload = b64(json.dumps(claims).encode())
-    return f"{header}.{payload}.not-a-real-signature"
-
-
 # -- JWT claim decoding --------------------------------------------------
 
 
-def test_decode_jwt_claims_reads_the_payload():
+def test_decode_jwt_claims_reads_the_payload(make_jwt):
     token = make_jwt({"tenantId": 123456, "sub": "user-1"})
     assert decode_jwt_claims(token) == {"tenantId": 123456, "sub": "user-1"}
 
 
-def test_decode_jwt_claims_handles_missing_padding():
+def test_decode_jwt_claims_handles_missing_padding(make_jwt):
     # A payload whose base64 length is not a multiple of 4 must still decode.
     token = make_jwt({"tenantId": 1})
     assert "=" not in token
@@ -66,17 +54,17 @@ def test_decode_jwt_claims_returns_empty_for_non_object_payload():
     assert decode_jwt_claims(f"header.{payload}.sig") == {}
 
 
-def test_token_exposes_tenant_id_from_claims():
+def test_token_exposes_tenant_id_from_claims(make_jwt):
     token = Token(access_token=make_jwt({"tenantId": 987654}), expires_at=0.0)
     assert token.tenant_id == "987654"
 
 
-def test_token_tenant_id_accepts_snake_case_claim():
+def test_token_tenant_id_accepts_snake_case_claim(make_jwt):
     token = Token(access_token=make_jwt({"tenant_id": "42"}), expires_at=0.0)
     assert token.tenant_id == "42"
 
 
-def test_token_tenant_id_is_none_when_absent():
+def test_token_tenant_id_is_none_when_absent(make_jwt):
     assert Token(access_token=make_jwt({"sub": "x"}), expires_at=0.0).tenant_id is None
     assert Token(access_token="opaque", expires_at=0.0).tenant_id is None
 

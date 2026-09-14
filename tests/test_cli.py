@@ -88,9 +88,7 @@ def test_tenant_command_reports_a_missing_token(capsys):
 
 
 @respx.mock
-def test_tenant_command_prints_the_claim(env, monkeypatch, capsys):
-    from tests.test_service_account import make_jwt
-
+def test_tenant_command_prints_the_claim(env, make_jwt, capsys):
     respx.post(TOKEN_URL).mock(
         return_value=httpx.Response(
             200,
