@@ -34,6 +34,11 @@ pythonpath = ["src"]
 [tool.ruff]
 line-length = 100
 src = ["src", "tests"]
+# Generated artifacts, not source. Ruff formats Python blocks inside Markdown, so it
+# would rewrap the snippets in these notes and the next regeneration would undo it -
+# the two checks would fight forever. `generate_object_notes.py --check` is what
+# guards these files.
+extend-exclude = [".claude/skills/fortnox/references/objects"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
