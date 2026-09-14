@@ -69,6 +69,41 @@ export FORTNOX_TENANT_ID=...     # client now uses client-credentials automatica
 For an unattended integration this is the better path. Reach for the refresh-token flow
 only when you genuinely need a user-account token. Both can coexist for one integration.
 
+## Writes post to real books — default to read-only
+
+A `GET` is harmless. A `POST` to `invoices` raises a real invoice, and a `POST` to
+`vouchers` posts to the ledger of a real company's accounts. Accounting records are not
+freely reversible: a booked voucher is corrected by another voucher, and the mistake stays
+in the audit trail. Treat every non-GET as an action with consequences outside the code.
+
+Before any `POST`, `PUT`, `PATCH` or `DELETE`:
+
+1. **Read first.** Fetch the record and confirm you are acting on what you think you are.
+2. **Dry run.** State the exact method, URL and body, and what it will change. Have a
+   human read it.
+3. **Get explicit approval.** Approval for one write is not approval for the next.
+4. **Sandbox before live.** Prove it on a test company first.
+
+Each object note under `references/objects/` records which methods a resource exposes and
+flags the destructive ones. Read the note before calling a resource you have not used.
+
+## Two APIs under one host
+
+Fortnox is really two API families, and they behave differently:
+
+- **`/3/…`** — the classic API, ~164 paths. Responses wrap records in a named key
+  (`{"Customers": [...]}`), `MetaInformation` drives paging, and `FortnoxClient` is built
+  around exactly this. Call it with a relative path: `client.get("customers")`.
+- **`/api/…`** — newer services (warehouse, recurring billing, time reporting,
+  fileattachments and others), ~85 paths. Different conventions; some list endpoints
+  return a **bare JSON array** with no wrapper, so `client.paginate()` does not apply.
+  The client's base URL points at `/3`, so pass the absolute URL:
+  `client.get("https://api.fortnox.se/api/warehouse/...")`.
+
+Assuming the `/3/` shape on an `/api/` resource fails confusingly — a 404 from the wrong
+base, or a `TypeError` from indexing a list as a dict. The object note for each resource
+shows the correct call.
+
 ## Rules that are easy to get wrong
 
 **Scopes are frozen at activation.** A connection keeps the scopes your integration had
@@ -106,10 +141,20 @@ When testing anything time-dependent, inject the clock rather than sleeping.
 
 ## Going deeper
 
+- **`references/objects/`** — one note per API resource (87 of them), generated from
+  Fortnox's OpenAPI spec: endpoints, the collection key `paginate` needs, fields, writable
+  fields and required ones, resource filters, and the safety rules for its writes. Start
+  at `references/objects/README.md` and read the note for the resource you are touching.
+  Regenerate with `scripts/generate_object_notes.py` when Fortnox publishes a new spec;
+  the notes are derived, so never edit one by hand.
 - `references/auth.md` — the flows end to end: endpoints, exact request shapes, token
   lifetimes, how to obtain a tenant id, what each failure means.
 - `references/api.md` — conventions for calling the API: pagination, filters, sorting,
   the error envelope, rate limits, and known gaps in this client.
+
+The object notes describe what Fortnox *documents*. Every one carries a `Date tested`
+line, and today they all say the same thing: not yet verified against a real tenant. When
+you confirm a call, record it in that note — a spec is a claim, a tested call is evidence.
 
 ## Verifying against a real tenant
 
