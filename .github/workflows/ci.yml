@@ -44,3 +44,8 @@ jobs:
 
       - name: Test
         run: .venv/bin/pytest --cov=fortnox --cov-report=term-missing
+
+      - name: Check the Fortnox object notes are regenerated, not hand-edited
+        # They are derived from the OpenAPI spec; an edit by hand would be silently
+        # undone by the next regeneration, so catch it here instead.
+        run: .venv/bin/python .claude/skills/fortnox/scripts/generate_object_notes.py --check
