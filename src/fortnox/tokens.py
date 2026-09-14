@@ -141,6 +141,22 @@ class Token:
         """
         return self.obtained_at + REFRESH_TOKEN_TTL_SECONDS
 
+    def refresh_token_age(self, *, now: float | None = None) -> float:
+        """Seconds since this refresh token was issued."""
+        now = time.time() if now is None else now
+        return max(now - self.obtained_at, 0.0)
+
+    def refresh_token_days_remaining(self, *, now: float | None = None) -> float:
+        """Estimated days before the refresh token dies of inactivity.
+
+        The 45-day window is an idle ceiling, not a budget: every refresh resets
+        it. This only matters for integrations that run less often than that -
+        a month-end job can sit through seven quiet weeks and find itself
+        disconnected on the next run.
+        """
+        now = time.time() if now is None else now
+        return (self.refresh_token_expires_at - now) / 86400.0
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "access_token": self.access_token,

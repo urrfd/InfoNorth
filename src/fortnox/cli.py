@@ -21,6 +21,11 @@ from .config import FortnoxConfig
 from .errors import FortnoxError
 from .tokens import FileTokenStore
 
+# Refresh tokens die after 45 idle days. Refresh weekly so a missed run or two
+# never gets near that, and warn while there is still time to act.
+DEFAULT_KEEPALIVE_DAYS = 7.0
+STALE_WARNING_DAYS = 10.0
+
 
 def _fmt_time(timestamp: float) -> str:
     return dt.datetime.fromtimestamp(timestamp, dt.UTC).isoformat(timespec="seconds")
@@ -78,9 +83,55 @@ def _cmd_status(config: FortnoxConfig, args: argparse.Namespace) -> int:
     print(f"  tenant id:             {token.tenant_id or '(not present in token)'}")
     print(f"  scopes:                {' '.join(token.scopes) or '(none reported)'}")
     if token.refresh_token:
+        days = token.refresh_token_days_remaining()
         print(f"  refresh token expires: ~{_fmt_time(token.refresh_token_expires_at)} (estimated)")
+        print(f"  idle window left:      ~{days:.1f} days")
+        if days <= STALE_WARNING_DAYS:
+            print(
+                f"\nWARNING: this refresh token goes stale in ~{days:.1f} days. Each refresh\n"
+                "resets the 45-day window, so run `fortnox-auth keepalive` on a schedule.\n"
+                "If it does expire, only the customer can reconnect the integration.",
+                file=sys.stderr,
+            )
     else:
         print("  refresh token:         none (client-credentials tokens do not have one)")
+    return 0
+
+
+def _cmd_keepalive(config: FortnoxConfig, args: argparse.Namespace) -> int:
+    """Refresh if the token has been idle too long. Safe to run from cron.
+
+    The 45-day refresh window is an idle ceiling that every refresh resets. An
+    integration that only runs at month-end can sit through it and find itself
+    disconnected, so this keeps the chain warm independently of real work.
+    """
+    if config.tenant_id:
+        print("Service-account mode: no refresh token to keep alive, nothing to do.")
+        return 0
+
+    store = FileTokenStore(config.token_path)
+    with store.transaction():
+        token = store.load()
+        if token is None:
+            print(f"No token stored at {config.token_path}.", file=sys.stderr)
+            return 1
+
+        age_days = token.refresh_token_age() / 86400.0
+        if age_days < args.max_age_days:
+            print(
+                f"Refresh token is {age_days:.1f} days old "
+                f"(threshold {args.max_age_days}); nothing to do."
+            )
+            return 0
+
+        new_token = oauth.refresh_token(config, token)
+        store.save(new_token)
+
+    print(
+        f"Refreshed after {age_days:.1f} idle days. "
+        f"Access token now expires {_fmt_time(new_token.expires_at)}, "
+        "45-day window reset."
+    )
     return 0
 
 
@@ -159,6 +210,20 @@ def build_parser() -> argparse.ArgumentParser:
 
     refresh_parser = subparsers.add_parser("refresh", help="force a token refresh")
     refresh_parser.set_defaults(func=_cmd_refresh)
+
+    keepalive_parser = subparsers.add_parser(
+        "keepalive", help="refresh only if the token has been idle; for cron"
+    )
+    keepalive_parser.add_argument(
+        "--max-age-days",
+        type=float,
+        default=DEFAULT_KEEPALIVE_DAYS,
+        help=(
+            "refresh when the stored refresh token is older than this "
+            f"(default {DEFAULT_KEEPALIVE_DAYS})"
+        ),
+    )
+    keepalive_parser.set_defaults(func=_cmd_keepalive)
 
     tenant_parser = subparsers.add_parser(
         "tenant", help="print the tenant id from the stored token"

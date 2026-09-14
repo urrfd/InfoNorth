@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+
 import httpx
 import pytest
 import respx
@@ -134,3 +136,106 @@ def test_status_command_reports_service_account_mode(env, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "client-credentials" in out
     assert "none (client-credentials tokens do not have one)" in out
+
+
+# -- keepalive -----------------------------------------------------------
+
+
+def _seed_token(env, obtained_at):
+    """Write a token file directly, with a chosen issue time."""
+    from fortnox.tokens import Token
+
+    store = FileTokenStore(env / "token.json")
+    store.save(
+        Token(
+            access_token="a",
+            refresh_token="r",
+            expires_at=obtained_at + 3600,
+            obtained_at=obtained_at,
+            scopes=("customer",),
+        )
+    )
+
+
+def test_keepalive_reports_a_missing_token(capsys):
+    assert main(["keepalive"]) == 1
+    assert "No token stored" in capsys.readouterr().err
+
+
+@respx.mock
+def test_keepalive_does_nothing_for_a_recent_token(env, capsys):
+    _seed_token(env, time.time() - 2 * 86400)
+    route = respx.post(TOKEN_URL).mock(return_value=httpx.Response(200, json=TOKEN_RESPONSE))
+
+    assert main(["keepalive"]) == 0
+
+    assert not route.called
+    assert "nothing to do" in capsys.readouterr().out
+
+
+@respx.mock
+def test_keepalive_refreshes_an_idle_token(env, capsys):
+    _seed_token(env, time.time() - 30 * 86400)
+    route = respx.post(TOKEN_URL).mock(
+        return_value=httpx.Response(
+            200, json={"access_token": "new-a", "refresh_token": "new-r", "expires_in": 3600}
+        )
+    )
+
+    assert main(["keepalive"]) == 0
+
+    assert route.called
+    # The rotated refresh token must be persisted, resetting the 45-day window.
+    token = FileTokenStore(env / "token.json").load()
+    assert token.refresh_token == "new-r"
+    assert token.refresh_token_days_remaining() > 44
+    assert "window reset" in capsys.readouterr().out
+
+
+@respx.mock
+def test_keepalive_threshold_is_configurable(env, capsys):
+    _seed_token(env, time.time() - 3 * 86400)
+    route = respx.post(TOKEN_URL).mock(
+        return_value=httpx.Response(
+            200, json={"access_token": "new-a", "refresh_token": "new-r", "expires_in": 3600}
+        )
+    )
+
+    assert main(["keepalive", "--max-age-days", "1"]) == 0
+    assert route.called
+
+
+@respx.mock
+def test_keepalive_surfaces_an_expired_chain_as_a_failure(env, capsys):
+    """A dead refresh chain needs a human, so it must not exit 0 from cron."""
+    _seed_token(env, time.time() - 50 * 86400)
+    respx.post(TOKEN_URL).mock(return_value=httpx.Response(400, json={"error": "invalid_grant"}))
+
+    assert main(["keepalive"]) == 1
+    assert "error:" in capsys.readouterr().err
+
+
+def test_keepalive_is_a_noop_in_service_account_mode(env, monkeypatch, capsys):
+    monkeypatch.setenv("FORTNOX_TENANT_ID", "424242")
+    assert main(["keepalive"]) == 0
+    assert "nothing to do" in capsys.readouterr().out
+
+
+@respx.mock
+def test_status_warns_when_the_idle_window_is_nearly_gone(env, capsys):
+    _seed_token(env, time.time() - 40 * 86400)
+
+    assert main(["status"]) == 0
+
+    captured = capsys.readouterr()
+    assert "idle window left" in captured.out
+    assert "WARNING" in captured.err
+    assert "keepalive" in captured.err
+
+
+@respx.mock
+def test_status_does_not_warn_for_a_fresh_token(env, capsys):
+    _seed_token(env, time.time())
+
+    assert main(["status"]) == 0
+    assert "WARNING" not in capsys.readouterr().err

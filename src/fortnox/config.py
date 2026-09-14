@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from pathlib import Path
 
 from .errors import FortnoxConfigError
 
@@ -72,6 +73,31 @@ class FortnoxConfig:
         if not self.client_secret:
             raise FortnoxConfigError("client_secret is required")
         self.api_base_url = self.api_base_url.rstrip("/")
+
+    def for_tenant(self, tenant_id: str, *, token_path: str | None = None) -> FortnoxConfig:
+        """Return a copy of this config scoped to one customer's tenant.
+
+        A token store must never be shared between tenants: the refresh token is
+        single-use, so two tenants behind one file race each other, and one
+        customer reconnecting would overwrite another's state. This derives a
+        distinct path per tenant - ``fortnox_token.json`` becomes
+        ``fortnox_token.123456.json`` - and sets ``tenant_id`` so the
+        client-credentials grant is used where it is available.
+
+        Example:
+            >>> base = FortnoxConfig.from_env()
+            >>> for tenant in ("123456", "789012"):
+            ...     client = FortnoxClient(base.for_tenant(tenant))
+        """
+        if not tenant_id:
+            raise FortnoxConfigError("tenant_id must not be empty")
+
+        if token_path is None:
+            path = Path(self.token_path)
+            safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in str(tenant_id))
+            token_path = str(path.with_name(f"{path.stem}.{safe}{path.suffix}"))
+
+        return replace(self, tenant_id=str(tenant_id), token_path=token_path)
 
     @classmethod
     def from_env(cls, **overrides: object) -> FortnoxConfig:

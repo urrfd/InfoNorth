@@ -80,7 +80,10 @@ fortnox-auth get companyinformation
 ```
 
 The token pair lands in `FORTNOX_TOKEN_PATH` (default `fortnox_token.json`) with `0600`
-permissions. It is gitignored — **do not commit it**.
+permissions. It is gitignored, but **keep it outside the repo in production**: it holds a
+live refresh token, which is a standing key to that customer's accounting data for up to
+45 days. Treat it with the same care as the client secret, and back it up knowing what it
+is.
 
 ### Switch to client credentials (no more refresh tokens)
 
@@ -156,6 +159,43 @@ re-authorizing, and retrying will not help.
 Fortnox sends it and otherwise backing off exponentially with full jitter. 4xx responses
 are not retried — apart from 401, which triggers exactly one forced refresh.
 
+### Serving several customers
+
+**One token store per tenant — never share a file.** The refresh token is single-use, so
+two tenants behind one store race each other, and one customer reconnecting would
+overwrite another's state. `for_tenant` derives an isolated path and selects the
+client-credentials grant:
+
+```python
+base = FortnoxConfig.from_env()
+
+for tenant_id in ("123456", "789012"):
+    with FortnoxClient(base.for_tenant(tenant_id)) as client:
+        ...  # token store: fortnox_token.123456.json, fortnox_token.789012.json
+```
+
+Rate limits are per access token, not per IP, so **every tenant gets its own 300/minute**.
+Serving 40 customers does not divide one allowance between them — which is why the limiter
+lives on the client instance rather than being global.
+
+### Keeping the refresh chain alive
+
+The 45 days is an **idle ceiling, not a budget**: every refresh resets it. An hourly job
+never comes close. A month-end job can — seven quiet weeks and it is dead on the next run,
+recoverable only by the customer reconnecting.
+
+If that is your shape, refresh on a schedule independent of the real work:
+
+```cron
+# Weekly, well inside the 45-day window. Exits non-zero if the chain has broken.
+0 3 * * 1  cd /srv/infonorth && .venv/bin/fortnox-auth keepalive
+```
+
+`keepalive` only refreshes when the stored token is older than `--max-age-days` (default 7),
+so it is cheap to run often and safe to run twice. `fortnox-auth status` warns once the
+window drops under 10 days. In service-account mode it is a no-op — there is no chain to
+keep alive, which is the other reason to prefer that grant.
+
 ### Running several workers
 
 `FileTokenStore` locks across processes via a sidecar `.lock` file, so multiple workers on
@@ -187,12 +227,15 @@ of the tenant's 25-per-5-seconds budget.
 - **Scopes are read+write** — there is no read-only variant — and cannot be added silently
   to an existing connection. Widening them means every customer re-activates, so request
   what you need up front.
+- **Legacy auth** (static `Access-Token` + `Client-Secret` headers) is retired and not
+  supported; for code that never refreshed anything, moving to OAuth2 is a rewrite rather
+  than a config change.
 - No live call has been made from this repo yet; the suite runs entirely against mocks.
 
 ### Develop
 
 ```bash
-.venv/bin/python -m pytest              # 99 tests, no network required
+.venv/bin/python -m pytest              # 121 tests, no network required
 .venv/bin/python -m pytest --cov=fortnox
 .venv/bin/python -m ruff check .
 .venv/bin/python -m ruff format .
