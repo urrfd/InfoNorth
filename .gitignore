@@ -14,3 +14,7 @@ htmlcov/
 # Never commit Fortnox tokens
 fortnox_token.json
 *.token.json
+
+# Generated incidentally by `uv run --with ...`; nothing here consumes it
+# (CI and local setup both use `uv pip install -e ".[dev]"`).
+uv.lock
